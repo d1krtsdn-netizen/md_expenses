@@ -102,6 +102,7 @@ const A=()=>db.settings.nameA, B=()=>db.settings.nameB;
 const money=(v,sign)=>{const s=db.settings.currency+Math.abs(v).toLocaleString('en-GB',{minimumFractionDigits:v%1?2:0,maximumFractionDigits:2});return(v<0?'−':sign&&v>0?'+':'')+s};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const val=t=>t.kind==='in'?+t.amount:-t.amount;
+const isTransfer=t=>!!t.transferId;
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 function defDate(){return ym===curYM()?new Date().toISOString().slice(0,10):ym+'-01'}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800)}
@@ -110,11 +111,13 @@ function monthStats(ledger,m){
  const all=db.tx.filter(t=>t.ledger===ledger);
  const open=all.filter(t=>t.date.slice(0,7)<m).reduce((s,t)=>s+val(t),0);
  const items=all.filter(t=>t.date.slice(0,7)===m).sort((a,b)=>b.date.localeCompare(a.date)||(a.kind==='in'?-1:1));
- const sum=f=>items.filter(f).reduce((s,t)=>s+ +t.amount,0), real=t=>t.cat!=='Adjustment';
- const inA=sum(t=>t.kind==='in'&&t.who==='monia'), inB=sum(t=>t.kind==='in'&&t.who==='deso');
- const inAll=sum(t=>t.kind==='in'&&real(t)), out=sum(t=>t.kind==='out'&&real(t));
- const adj=items.filter(t=>!real(t)).reduce((s,t)=>s+val(t),0);
- return{open,items,inA,inB,inAll,out,adj,close:open+inAll-out+adj};
+ const sum=f=>items.filter(f).reduce((s,t)=>s+ +t.amount,0), real=t=>t.cat!=='Adjustment'&&!isTransfer(t);
+ const inA=sum(t=>t.kind==='in'&&(t.who==='monia'||isTransfer(t)&&t.ledger==='shared'));
+ const inB=sum(t=>t.kind==='in'&&t.who==='deso');
+ const inAll=sum(t=>t.kind==='in'&&t.cat!=='Adjustment'), out=sum(t=>t.kind==='out'&&real(t));
+ const transfer=items.filter(t=>isTransfer(t)&&t.kind==='out').reduce((s,t)=>s+val(t),0);
+ const adjustment=items.filter(t=>t.cat==='Adjustment').reduce((s,t)=>s+val(t),0);
+ return{open,items,inA,inB,inAll,out,adj:adjustment,transfer,close:open+items.reduce((s,t)=>s+val(t),0)};
 }
 
 function render(){
@@ -130,18 +133,19 @@ function render(){
 function ledgerView(l){
  const s=monthStats(l,ym), sh=l==='shared';
  const adjRow=s.adj?`<div class="row"><span>Adjustment</span><span>${money(s.adj,1)}</span></div>`:'';
+ const transferRow=s.transfer?`<div class="row"><span>Transfers out</span><span>${money(s.transfer,1)}</span></div>`:'';
  const head=sh?`
   <div class="row"><span>Brought forward</span><span>${money(s.open)}</span></div>
   <div class="row"><span>${esc(A())} paid in</span><span class="in">${money(s.inA,1)}</span></div>
   <div class="row"><span>${esc(B())} paid in</span><span class="in">${money(s.inB,1)}</span></div>
   ${s.inAll-s.inA-s.inB?`<div class="row"><span>Other money in</span><span class="in">${money(s.inAll-s.inA-s.inB,1)}</span></div>`:''}
-  <div class="row"><span>Spent</span><span class="out">${money(-s.out)}</span></div>${adjRow}`
+  <div class="row"><span>Spent</span><span class="out">${money(-s.out)}</span></div>${transferRow}${adjRow}`
  :`<div class="row"><span>Brought forward</span><span>${money(s.open)}</span></div>
   <div class="row"><span>Money in</span><span class="in">${money(s.inAll,1)}</span></div>
-  <div class="row"><span>Spent</span><span class="out">${money(-s.out)}</span></div>${adjRow}`;
+  <div class="row"><span>Spent</span><span class="out">${money(-s.out)}</span></div>${transferRow}${adjRow}`;
  const list=s.items.length?s.items.map(t=>`<div class="tx" data-id="${t.id}">
    <div class="ic">${ICON[t.cat]||'•'}</div>
-   <div class="t"><div>${esc(t.note||t.cat)}</div><div class="mute">${new Date(t.date+'T12:00').toLocaleDateString('en-GB',{day:'numeric',month:'short'})} · ${t.kind==='in'&&sh&&t.who?esc(t.who==='monia'?A():B()):esc(t.cat)}</div></div>
+   <div class="t"><div>${esc(t.note||t.cat)}</div><div class="mute">${new Date(t.date+'T12:00').toLocaleDateString('en-GB',{day:'numeric',month:'short'})} · ${isTransfer(t)?`Transfer ${t.kind==='in'?'from':'to'} ${esc(t.transferLedger==='shared'?'Shared':A())}`:t.kind==='in'&&sh&&t.who?esc(t.who==='monia'?A():B()):esc(t.cat)}</div></div>
    <div class="a ${t.kind==='in'?'in':''}">${money(val(t),t.kind==='in')}</div></div>`).join('')
   :`<div class="empty">Nothing logged for ${ymLabel(ym)} yet.</div>`;
  const prevHas=db.tx.some(t=>t.ledger==='shared'&&t.date.slice(0,7)===shiftYM(ym,-1));
@@ -149,7 +153,8 @@ function ledgerView(l){
  return `<div class="card"><div class="mute">${sh?'Shared account':esc(A())+"'s personal money"} · balance</div>
    <div class="big ${s.close<0?'out':''}">${money(s.close)}</div>${head}</div>
   <div class="card"><div class="qa"><input id="quick" placeholder="${sh?'e.g. 45 tesco  ·  +2000 '+A().toLowerCase():'e.g. 30 nails  ·  +500 in'}" enterkeyhint="done" autocomplete="off"><button class="p" onclick="quickAdd()">Add</button></div>
-   <div class="btns"><button class="s" onclick="openForm({kind:'out'})">− Expense</button><button class="s" onclick="openForm({kind:'in'})">+ Money in</button></div>${startBtn}</div>
+   <div class="btns"><button class="s" onclick="openForm({kind:'out'})">− Expense</button><button class="s" onclick="openForm({kind:'in'})">+ Money in</button></div>
+   <div class="btns"><button class="s" onclick="openTransfer()">⇄ Transfer</button></div>${startBtn}</div>
   <div class="card">${list}</div>`;
 }
 
@@ -191,7 +196,63 @@ function saveStart(){
  save();closeSheet();render();toast('Month started');
 }
 
+function openTransfer(pre={}){
+ const transfer=pre.id?db.tx.find(t=>t.id===pre.id):null;
+ const paired=transfer?.transferId?db.tx.filter(t=>t.transferId===transfer.transferId):[];
+ const out=paired.find(t=>t.kind==='out')||transfer;
+ const incoming=paired.find(t=>t.kind==='in');
+ editing=transfer?{transferId:transfer.transferId,ids:paired.map(t=>t.id)}:null;
+ draft={
+  from:out?.ledger||tab,
+  to:incoming?.ledger||((out?.ledger||tab)==='shared'?'monia':'shared'),
+  amount:out?.amount||'',
+  note:out?.note||'',
+  date:out?.date||defDate()
+ };
+ drawTransfer();
+}
+function drawTransfer(){
+ const d=draft;
+ const account=l=>l==='shared'?'Shared':A();
+ sheet(`<h3 style="margin:4px 0">${editing?'Edit transfer':'Transfer between accounts'}</h3>
+  <label>From</label><select id="trFrom" onchange="setTransferAccount('from',this.value)"><option value="shared" ${d.from==='shared'?'selected':''}>Shared</option><option value="monia" ${d.from==='monia'?'selected':''}>${esc(A())}</option></select>
+  <label>To</label><select id="trTo" onchange="setTransferAccount('to',this.value)"><option value="shared" ${d.to==='shared'?'selected':''}>Shared</option><option value="monia" ${d.to==='monia'?'selected':''}>${esc(A())}</option></select>
+  <label>Amount (${db.settings.currency})</label><input id="trAmt" type="number" inputmode="decimal" step="0.01" value="${d.amount}">
+  <label>What for?</label><input id="trNote" value="${esc(d.note)}">
+  <label>Date</label><input id="trDate" type="date" value="${d.date}">
+  <div class="btns">${editing?'<button class="d" onclick="delTransfer()">Delete</button>':''}<button class="s" onclick="closeSheet()">Cancel</button><button class="p" onclick="saveTransfer()">Save</button></div>`);
+}
+function setTransferAccount(field,value){
+ grabTransfer();
+ draft[field]=value;
+ if(draft.from===draft.to)draft[field==='from'?'to':'from']=field==='from'?(value==='shared'?'monia':'shared'):(value==='shared'?'monia':'shared');
+ drawTransfer();
+}
+function grabTransfer(){
+ const g=id=>document.getElementById(id);
+ if(!g('trAmt'))return;
+ draft.from=g('trFrom').value;draft.to=g('trTo').value;draft.amount=g('trAmt').value;draft.note=g('trNote').value;draft.date=g('trDate').value;
+}
+function saveTransfer(){
+ grabTransfer();
+ const amount=parseFloat(draft.amount);
+ if(!(amount>0)){toast('Enter an amount');return}
+ if(draft.from===draft.to){toast('Choose two different accounts');return}
+ const transferId=editing?.transferId||uid(), common={transferId,amount,date:draft.date,note:draft.note.trim()||'Transfer',cat:'Transfer'};
+ const records=[
+  {...common,id:editing?.ids.find(id=>db.tx.find(t=>t.id===id)?.kind==='out')||uid(),ledger:draft.from,kind:'out',transferLedger:draft.to},
+  {...common,id:editing?.ids.find(id=>db.tx.find(t=>t.id===id)?.kind==='in')||uid(),ledger:draft.to,kind:'in',transferLedger:draft.from}
+ ];
+ if(editing)db.tx=db.tx.filter(t=>!editing.ids.includes(t.id));
+ db.tx.push(...records);save();closeSheet();ym=draft.date.slice(0,7);tab=draft.from;render();toast('Transfer saved');
+}
+function delTransfer(){
+ if(!confirm('Delete this transfer from both accounts?'))return;
+ db.tx=db.tx.filter(t=>t.transferId!==editing.transferId);save();closeSheet();render();toast('Transfer deleted');
+}
+
 function openForm(pre){
+ if(pre.id&&isTransfer(db.tx.find(t=>t.id===pre.id)||{})){openTransfer(pre);return}
  const t=pre.id?db.tx.find(x=>x.id===pre.id):null; editing=t;
  draft=Object.assign({ledger:tab,kind:'out',amount:'',date:defDate(),note:'',cat:'',who:'deso'},t||pre);
  if(!draft.cat)draft.cat=draft.kind==='in'?(draft.ledger==='shared'?'Contribution':'Money in'):guessCat(draft.note);
@@ -229,7 +290,7 @@ function summaryView(){
  const rows=months.map(m=>{const s=monthStats('shared',m),p=monthStats('monia',m);return{m,s,p}}).filter(r=>r.s.items.length||r.p.items.length);
  if(!rows.length)return `<div class="card empty">No entries in ${y}.</div>`;
  const mm=m=>new Date(m+'-01T12:00').toLocaleDateString('en-GB',{month:'short'});
- const catBlock=l=>{const c={};db.tx.filter(t=>t.ledger===l&&t.kind==='out'&&t.date.startsWith(y)&&t.cat!=='Adjustment').forEach(t=>c[t.cat]=(c[t.cat]||0)+ +t.amount);
+ const catBlock=l=>{const c={};db.tx.filter(t=>t.ledger===l&&t.kind==='out'&&t.date.startsWith(y)&&t.cat!=='Adjustment'&&!isTransfer(t)).forEach(t=>c[t.cat]=(c[t.cat]||0)+ +t.amount);
   const e=Object.entries(c).sort((a,b)=>b[1]-a[1]),mx=e[0]?.[1]||1;
   return e.map(([k,v])=>`<div style="margin:8px 0"><div class="row" style="padding:0"><span>${ICON[k]||''} ${k}</span><span>${money(v)}</span></div><div class="bar" style="width:${Math.max(3,v/mx*100)}%"></div></div>`).join('')||'<div class="mute">No spending.</div>'};
  const tA=rows.reduce((s,r)=>s+r.s.inA,0), tB=rows.reduce((s,r)=>s+r.s.inB,0);
